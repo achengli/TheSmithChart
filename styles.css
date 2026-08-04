@@ -102,6 +102,46 @@
 	will-change: opacity;
 }
 
+.smith-fade-row.is-latest {
+	color: var(--interactive-accent);
+}
+
+@keyframes smith-hud-fade-full {
+	from {
+		opacity: 1;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
+@keyframes smith-hud-fade-soft {
+	from {
+		opacity: 0.55;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
+@keyframes smith-point-fade-full {
+	from {
+		opacity: 1;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
+@keyframes smith-point-fade-soft {
+	from {
+		opacity: 0.55;
+	}
+	to {
+		opacity: 0;
+	}
+}
+
 .smith-chart-host {
 	flex: 1;
 	min-height: 0;

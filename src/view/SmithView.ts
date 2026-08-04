@@ -179,6 +179,7 @@ export class SmithView extends ItemView {
 		this.history.add(point);
 		this.chart?.setFadePoints([...this.history.fading]);
 		this.syncHudRows();
+		this.ensureFadeLoop();
 	}
 
 	/** Create/remove HUD rows when the set of fading points changes */
@@ -195,57 +196,49 @@ export class SmithView extends ItemView {
 			}
 		}
 
+		const now = Date.now();
 		for (const entry of this.history.fading) {
 			let row = existing.get(entry.point.id);
+			const isLatest = entry.point.id === this.history.fading[0]?.point.id;
 			if (!row) {
 				row = document.createElement("div");
 				row.className = "smith-fade-row";
 				row.dataset.pointId = entry.point.id;
 				row.textContent = this.history.formatPoint(entry.point);
 			}
+			row.classList.toggle("is-latest", isLatest);
+			const age = Math.max(0, now - (entry.expiresAt - FADE_MS));
+			const anim = isLatest ? "smith-hud-fade-full" : "smith-hud-fade-soft";
+			row.style.animation = "none";
+			void row.offsetWidth;
+			row.style.animation = `${anim} ${FADE_MS}ms linear forwards`;
+			row.style.animationDelay = `-${age}ms`;
 			this.fadeListEl.appendChild(row);
 		}
-		this.updateHudOpacities();
 	}
 
-	private updateHudOpacities(): void {
-		if (!this.fadeListEl) return;
-		const now = Date.now();
-		const byId = new Map(
-			this.history.fading.map((e) => [e.point.id, e] as const)
-		);
-		for (const child of Array.from(this.fadeListEl.children)) {
-			const row = child as HTMLElement;
-			const entry = byId.get(row.dataset.pointId ?? "");
-			if (!entry) continue;
-			const remaining = Math.max(0, entry.expiresAt - now);
-			const t = remaining / FADE_MS;
-			const isLatest =
-				this.history.fading.length > 0 &&
-				entry.point.id === this.history.fading[0].point.id;
-			const peak = isLatest ? 1 : 0.55;
-			row.style.opacity = String(peak * t);
-		}
+	/** Lightweight prune only while there are fading points */
+	private ensureFadeLoop(): void {
+		if (this.fadeTimer !== null) return;
+		if (this.history.fading.length === 0) return;
+		this.fadeTimer = window.setInterval(() => {
+			if (this.history.pruneExpired()) {
+				this.chart?.setFadePoints([...this.history.fading]);
+				this.syncHudRows();
+			}
+			if (this.history.fading.length === 0) {
+				this.stopFadeLoop();
+			}
+		}, 250);
 	}
 
 	private startFadeLoop(): void {
-		this.stopFadeLoop();
-		const tick = () => {
-			const pruned = this.history.pruneExpired();
-			if (pruned) {
-				this.chart?.setFadePoints([...this.history.fading]);
-				this.syncHudRows();
-			} else {
-				this.updateHudOpacities();
-			}
-			this.fadeTimer = window.requestAnimationFrame(tick);
-		};
-		this.fadeTimer = window.requestAnimationFrame(tick);
+		this.ensureFadeLoop();
 	}
 
 	private stopFadeLoop(): void {
 		if (this.fadeTimer !== null) {
-			window.cancelAnimationFrame(this.fadeTimer);
+			window.clearInterval(this.fadeTimer);
 			this.fadeTimer = null;
 		}
 	}
@@ -254,6 +247,7 @@ export class SmithView extends ItemView {
 		new SessionHistoryModal(this.app, this.history, () => {
 			this.chart?.setFadePoints([...this.history.fading]);
 			this.syncHudRows();
+			this.ensureFadeLoop();
 		}).open();
 	}
 }

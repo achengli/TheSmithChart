@@ -121,6 +121,7 @@ export function renderGrid(
 ): void {
 	while (parent.firstChild) parent.removeChild(parent.firstChild);
 
+	const frag = document.createDocumentFragment();
 	const rVals = getRValues(level);
 	const xVals = getXValues(level);
 
@@ -129,7 +130,7 @@ export function renderGrid(
 	unit.setAttribute("cy", "0");
 	unit.setAttribute("r", "1");
 	unit.setAttribute("class", "smith-unit-circle");
-	parent.appendChild(unit);
+	frag.appendChild(unit);
 
 	const realAxis = document.createElementNS(svgNS, "line");
 	realAxis.setAttribute("x1", "-1");
@@ -137,7 +138,7 @@ export function renderGrid(
 	realAxis.setAttribute("x2", "1");
 	realAxis.setAttribute("y2", "0");
 	realAxis.setAttribute("class", "smith-axis");
-	parent.appendChild(realAxis);
+	frag.appendChild(realAxis);
 
 	const imagAxis = document.createElementNS(svgNS, "line");
 	imagAxis.setAttribute("x1", "0");
@@ -145,7 +146,18 @@ export function renderGrid(
 	imagAxis.setAttribute("x2", "0");
 	imagAxis.setAttribute("y2", "1");
 	imagAxis.setAttribute("class", "smith-axis");
-	parent.appendChild(imagAxis);
+	frag.appendChild(imagAxis);
+
+	const labelRs = new Set(
+		level >= 2
+			? [0, 0.2, 0.5, 1, 2, 5]
+			: level >= 1
+				? [0, 0.2, 0.5, 1, 2, 5]
+				: [0, 0.5, 1, 2]
+	);
+	const labelXs = new Set(
+		level >= 1 ? [0.5, 1, 2] : [0.5, 1, 2]
+	);
 
 	for (const r of rVals) {
 		const { cx, radius } = rCircle(r);
@@ -157,16 +169,16 @@ export function renderGrid(
 			"class",
 			r === 0 || r === 1 ? "smith-grid-major" : "smith-grid"
 		);
-		parent.appendChild(c);
+		frag.appendChild(c);
 
-		if (level >= 1 || r === 0 || r === 0.5 || r === 1 || r === 2) {
+		if (labelRs.has(r)) {
 			const label = document.createElementNS(svgNS, "text");
 			label.setAttribute("x", String(cx - radius));
 			label.setAttribute("y", "0.04");
 			label.setAttribute("class", "smith-label");
 			label.setAttribute("text-anchor", "middle");
 			label.textContent = String(r);
-			parent.appendChild(label);
+			frag.appendChild(label);
 		}
 	}
 
@@ -181,9 +193,9 @@ export function renderGrid(
 				"class",
 				x === 1 || x === 0.5 ? "smith-grid-major" : "smith-grid"
 			);
-			parent.appendChild(path);
+			frag.appendChild(path);
 
-			if (level >= 1 || x === 0.5 || x === 1 || x === 2) {
+			if (labelXs.has(x)) {
 				const midZ: Complex = { re: 0.5, im: xv };
 				const g = zToGamma(midZ);
 				const label = document.createElementNS(svgNS, "text");
@@ -195,8 +207,10 @@ export function renderGrid(
 				label.setAttribute("class", "smith-label");
 				label.setAttribute("text-anchor", "middle");
 				label.textContent = sign > 0 ? `+j${x}` : `−j${x}`;
-				parent.appendChild(label);
+				frag.appendChild(label);
 			}
 		}
 	}
+
+	parent.appendChild(frag);
 }

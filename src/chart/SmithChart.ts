@@ -22,6 +22,8 @@ const POINT_PX_ACTIVE = 5.5;
 const POINT_PX_FADE = 4.5;
 const CURSOR_PX = 4.5;
 
+const GRID_DEBOUNCE_MS = 140;
+
 export type CursorInfo = {
 	gamma: Complex;
 	z: Complex;
@@ -55,15 +57,25 @@ export class SmithChart {
 
 	private readonly minScale = 0.55;
 	private readonly maxScale = 16;
-	/** View half-extent at scale 1 (includes outer scales) */
 	private readonly viewExtent = 1.55;
 
 	private width = 400;
 	private height = 400;
+	/** Cached layout; refreshed on resize / pointerdown / wheel start */
+	private hostRect: DOMRect | null = null;
 
 	private fadeEntries: FadeEntry[] = [];
 	private pointEls = new Map<string, SVGCircleElement>();
-	private fadeRaf = 0;
+
+	private gridTimer = 0;
+	private pendingGridLevel = -1;
+	private wheelRaf = 0;
+	private wheelAcc = 0;
+	private wheelX = 0;
+	private wheelY = 0;
+	private cursorRaf = 0;
+	private pendingCursor: { x: number; y: number } | null = null;
+	private lastVbW = 0;
 
 	constructor(
 		private host: HTMLElement,
@@ -72,17 +84,6 @@ export class SmithChart {
 		this.svg = document.createElementNS(SVG_NS, "svg");
 		this.svg.setAttribute("class", "smith-svg");
 		this.svg.setAttribute("xmlns", SVG_NS);
-
-		const defs = document.createElementNS(SVG_NS, "defs");
-		const clip = document.createElementNS(SVG_NS, "clipPath");
-		clip.setAttribute("id", "smith-unit-clip");
-		const clipCircle = document.createElementNS(SVG_NS, "circle");
-		clipCircle.setAttribute("cx", "0");
-		clipCircle.setAttribute("cy", "0");
-		clipCircle.setAttribute("r", "1");
-		clip.appendChild(clipCircle);
-		defs.appendChild(clip);
-		this.svg.appendChild(defs);
 
 		this.world = document.createElementNS(SVG_NS, "g");
 		this.world.setAttribute("class", "smith-world");
@@ -115,27 +116,28 @@ export class SmithChart {
 	}
 
 	destroy(): void {
-		this.stopFadeLoop();
+		this.clearGridTimer();
+		if (this.wheelRaf) cancelAnimationFrame(this.wheelRaf);
+		if (this.cursorRaf) cancelAnimationFrame(this.cursorRaf);
 		this.svg.remove();
 	}
 
 	setSessionPoints(_points: SmithPoint[]): void {
-		// Chart only shows points while they are fading
+		/* chart only shows fading points */
 	}
 
 	setFadePoints(entries: FadeEntry[]): void {
 		this.fadeEntries = entries;
 		this.syncPointElements();
-		this.startFadeLoop();
 	}
 
 	resize(): void {
-		const rect = this.host.getBoundingClientRect();
-		this.width = Math.max(rect.width, 100);
-		this.height = Math.max(rect.height, 100);
+		this.hostRect = this.host.getBoundingClientRect();
+		this.width = Math.max(this.hostRect.width, 100);
+		this.height = Math.max(this.hostRect.height, 100);
 		this.svg.setAttribute("width", String(this.width));
 		this.svg.setAttribute("height", String(this.height));
-		this.applyViewBox();
+		this.applyViewBox({ updateSizes: true, scheduleGrid: true });
 	}
 
 	resetView(): void {
@@ -143,7 +145,8 @@ export class SmithChart {
 		this.panX = 0;
 		this.panY = 0;
 		this.gridLevel = -1;
-		this.applyViewBox();
+		this.applyViewBox({ updateSizes: true, scheduleGrid: false });
+		this.redrawGrid(true);
 	}
 
 	private syncPointElements(): void {
@@ -158,6 +161,10 @@ export class SmithChart {
 			}
 		}
 
+		const rActive = this.pxToUser(POINT_PX_ACTIVE);
+		const rFade = this.pxToUser(POINT_PX_FADE);
+		const now = Date.now();
+
 		for (const entry of this.fadeEntries) {
 			const p = entry.point;
 			let c = this.pointEls.get(p.id);
@@ -169,20 +176,30 @@ export class SmithChart {
 				this.pointsG.appendChild(c);
 				this.pointEls.set(p.id, c);
 			}
+			c.setAttribute("r", String(isLatest ? rActive : rFade));
 			c.setAttribute(
 				"class",
 				isLatest ? "smith-point-active" : "smith-point-fade"
 			);
+			const age = Math.max(0, now - (entry.expiresAt - FADE_MS));
+			const anim = isLatest
+				? "smith-point-fade-full"
+				: "smith-point-fade-soft";
+			c.style.animation = "none";
+			c.style.animationDelay = "0s";
+			// Restart CSS animation on SVG (no offsetWidth)
+			requestAnimationFrame(() => {
+				c!.style.animation = `${anim} ${FADE_MS}ms linear forwards`;
+				c!.style.animationDelay = `-${age}ms`;
+			});
 		}
-		this.updatePointSizes();
-		this.updatePointOpacities();
+		this.cursorDot.setAttribute("r", String(this.pxToUser(CURSOR_PX)));
 	}
 
-	/** User-space radius that renders as `px` screen pixels at current zoom */
 	private pxToUser(px: number): number {
-		const vb = this.svg.viewBox.baseVal;
-		if (!vb.width || !this.width) return px * 0.01;
-		return (px * vb.width) / this.width;
+		const vbW = this.lastVbW || this.svg.viewBox.baseVal.width;
+		if (!vbW || !this.width) return px * 0.01;
+		return (px * vbW) / this.width;
 	}
 
 	private updatePointSizes(): void {
@@ -201,43 +218,10 @@ export class SmithChart {
 		this.cursorDot.setAttribute("r", String(this.pxToUser(CURSOR_PX)));
 	}
 
-	private updatePointOpacities(): void {
-		const now = Date.now();
-		for (const entry of this.fadeEntries) {
-			const el = this.pointEls.get(entry.point.id);
-			if (!el) continue;
-			const remaining = Math.max(0, entry.expiresAt - now);
-			const t = remaining / FADE_MS;
-			const isLatest =
-				this.fadeEntries.length > 0 &&
-				entry.point.id === this.fadeEntries[0].point.id;
-			const peak = isLatest ? 1 : 0.55;
-			el.setAttribute("opacity", String(peak * t));
-		}
-	}
-
-	private startFadeLoop(): void {
-		this.stopFadeLoop();
-		if (this.fadeEntries.length === 0) return;
-		const tick = () => {
-			this.updatePointOpacities();
-			if (this.fadeEntries.some((e) => e.expiresAt > Date.now())) {
-				this.fadeRaf = requestAnimationFrame(tick);
-			} else {
-				this.fadeRaf = 0;
-			}
-		};
-		this.fadeRaf = requestAnimationFrame(tick);
-	}
-
-	private stopFadeLoop(): void {
-		if (this.fadeRaf) {
-			cancelAnimationFrame(this.fadeRaf);
-			this.fadeRaf = 0;
-		}
-	}
-
-	private applyViewBox(): void {
+	private applyViewBox(opts: {
+		updateSizes?: boolean;
+		scheduleGrid?: boolean;
+	}): void {
 		const aspect = this.width / this.height;
 		let hw = this.viewExtent / this.scale;
 		let hh = this.viewExtent / this.scale;
@@ -246,20 +230,48 @@ export class SmithChart {
 		} else {
 			hh /= aspect;
 		}
+		const vbW = hw * 2;
+		const vbH = hh * 2;
 		const minX = this.panX - hw;
 		const minY = this.panY - hh;
-		this.svg.setAttribute(
-			"viewBox",
-			`${minX} ${minY} ${hw * 2} ${hh * 2}`
-		);
-		this.redrawGrid(false);
-		this.updatePointSizes();
+		this.lastVbW = vbW;
+		this.svg.setAttribute("viewBox", `${minX} ${minY} ${vbW} ${vbH}`);
+
+		if (opts.updateSizes) {
+			this.updatePointSizes();
+		}
+
+		if (opts.scheduleGrid !== false) {
+			const level = zoomToLevel(this.scale);
+			if (level !== this.gridLevel) {
+				this.scheduleGridRedraw(level);
+			}
+		}
+	}
+
+	private scheduleGridRedraw(level: number): void {
+		this.pendingGridLevel = level;
+		this.clearGridTimer();
+		this.gridTimer = window.setTimeout(() => {
+			this.gridTimer = 0;
+			if (this.pendingGridLevel !== this.gridLevel) {
+				this.redrawGrid(true);
+			}
+		}, GRID_DEBOUNCE_MS);
+	}
+
+	private clearGridTimer(): void {
+		if (this.gridTimer) {
+			window.clearTimeout(this.gridTimer);
+			this.gridTimer = 0;
+		}
 	}
 
 	private redrawGrid(force: boolean): void {
 		const level = zoomToLevel(this.scale);
 		if (!force && level === this.gridLevel) return;
 		this.gridLevel = level;
+		this.pendingGridLevel = level;
 		renderGrid(SVG_NS, this.gridG, level);
 		renderScales(this.angleG, this.wlG, level);
 	}
@@ -275,14 +287,24 @@ export class SmithChart {
 		this.svg.addEventListener("pointercancel", (e) => this.onPointerUp(e));
 	}
 
+	private refreshHostRect(): void {
+		this.hostRect = this.svg.getBoundingClientRect();
+	}
+
 	private clientToGamma(clientX: number, clientY: number): Complex {
-		const rect = this.svg.getBoundingClientRect();
-		const vb = this.svg.viewBox.baseVal;
-		const sx = (clientX - rect.left) / rect.width;
-		const sy = (clientY - rect.top) / rect.height;
-		const svgX = vb.x + sx * vb.width;
-		const svgY = vb.y + sy * vb.height;
-		return { re: svgX, im: -svgY };
+		const rect = this.hostRect ?? this.svg.getBoundingClientRect();
+		const aspect = this.width / this.height;
+		let hw = this.viewExtent / this.scale;
+		let hh = this.viewExtent / this.scale;
+		if (aspect > 1) hw *= aspect;
+		else hh /= aspect;
+		const vbW = hw * 2;
+		const vbH = hh * 2;
+		const minX = this.panX - hw;
+		const minY = this.panY - hh;
+		const sx = (clientX - rect.left) / Math.max(rect.width, 1);
+		const sy = (clientY - rect.top) / Math.max(rect.height, 1);
+		return { re: minX + sx * vbW, im: -(minY + sy * vbH) };
 	}
 
 	private emitCursor(g: Complex | null): void {
@@ -312,20 +334,46 @@ export class SmithChart {
 
 	private onWheel(e: WheelEvent): void {
 		e.preventDefault();
-		const before = this.clientToGamma(e.clientX, e.clientY);
+		if (!this.hostRect) this.refreshHostRect();
+		this.wheelX = e.clientX;
+		this.wheelY = e.clientY;
+		// Accumulate zoom factors within one frame
 		const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+		this.wheelAcc = (this.wheelAcc || 1) * factor;
+		if (!this.wheelRaf) {
+			this.wheelRaf = requestAnimationFrame(() => {
+				this.wheelRaf = 0;
+				this.flushWheel();
+			});
+		}
+	}
+
+	private flushWheel(): void {
+		const factor = this.wheelAcc || 1;
+		this.wheelAcc = 0;
+		const before = this.clientToGamma(this.wheelX, this.wheelY);
 		const next = Math.min(
 			this.maxScale,
 			Math.max(this.minScale, this.scale * factor)
 		);
 		if (next === this.scale) return;
 		this.scale = next;
-		this.applyViewBox();
-		const after = this.clientToGamma(e.clientX, e.clientY);
-		this.panX += before.re - after.re;
-		this.panY += -(before.im - after.im);
+		// Adjust pan so cursor stays put, then one viewBox update
+		const aspect = this.width / this.height;
+		let hw = this.viewExtent / this.scale;
+		let hh = this.viewExtent / this.scale;
+		if (aspect > 1) hw *= aspect;
+		else hh /= aspect;
+		const rect = this.hostRect ?? this.svg.getBoundingClientRect();
+		const sx = (this.wheelX - rect.left) / Math.max(rect.width, 1);
+		const sy = (this.wheelY - rect.top) / Math.max(rect.height, 1);
+		// After scale, gamma under cursor without pan change:
+		const afterRe = this.panX - hw + sx * hw * 2;
+		const afterIm = -(this.panY - hh + sy * hh * 2);
+		this.panX += before.re - afterRe;
+		this.panY += -(before.im - afterIm);
 		this.clampPan();
-		this.applyViewBox();
+		this.applyViewBox({ updateSizes: true, scheduleGrid: true });
 	}
 
 	private clampPan(): void {
@@ -336,6 +384,7 @@ export class SmithChart {
 
 	private onPointerDown(e: PointerEvent): void {
 		if (e.button !== 0) return;
+		this.refreshHostRect();
 		this.dragging = true;
 		this.didDrag = false;
 		this.lastPtrX = e.clientX;
@@ -359,11 +408,20 @@ export class SmithChart {
 				this.clampPan();
 				this.lastPtrX = e.clientX;
 				this.lastPtrY = e.clientY;
-				this.applyViewBox();
+				// Pan: viewBox only — no point resize, no grid rebuild
+				this.applyViewBox({ updateSizes: false, scheduleGrid: false });
 			}
 		}
-		const g = this.clientToGamma(e.clientX, e.clientY);
-		this.emitCursor(g);
+		this.pendingCursor = { x: e.clientX, y: e.clientY };
+		if (!this.cursorRaf) {
+			this.cursorRaf = requestAnimationFrame(() => {
+				this.cursorRaf = 0;
+				if (!this.pendingCursor) return;
+				const { x, y } = this.pendingCursor;
+				this.pendingCursor = null;
+				this.emitCursor(this.clientToGamma(x, y));
+			});
+		}
 	}
 
 	private onPointerUp(e: PointerEvent): void {
@@ -377,8 +435,7 @@ export class SmithChart {
 		if (!this.didDrag) {
 			const g = this.clientToGamma(e.clientX, e.clientY);
 			if (Math.hypot(g.re, g.im) <= 1.001) {
-				const point = createPoint(g);
-				this.callbacks.onPoint(point);
+				this.callbacks.onPoint(createPoint(g));
 			}
 		}
 		this.didDrag = false;
