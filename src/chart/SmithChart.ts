@@ -13,8 +13,14 @@ import {
 } from "../math/smith";
 import { renderGrid, zoomToLevel } from "./grid";
 import { renderScales } from "./scales";
+import { FADE_MS, type FadeEntry } from "../history/PointHistory";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Point radius in screen pixels (does not grow with zoom) */
+const POINT_PX_ACTIVE = 5.5;
+const POINT_PX_FADE = 4.5;
+const CURSOR_PX = 4.5;
 
 export type CursorInfo = {
 	gamma: Complex;
@@ -55,8 +61,9 @@ export class SmithChart {
 	private width = 400;
 	private height = 400;
 
-	private sessionPoints: SmithPoint[] = [];
-	private fadePoints: SmithPoint[] = [];
+	private fadeEntries: FadeEntry[] = [];
+	private pointEls = new Map<string, SVGCircleElement>();
+	private fadeRaf = 0;
 
 	constructor(
 		private host: HTMLElement,
@@ -90,7 +97,6 @@ export class SmithChart {
 		this.pointsG.setAttribute("class", "smith-points-layer");
 
 		this.cursorDot = document.createElementNS(SVG_NS, "circle");
-		this.cursorDot.setAttribute("r", "0.018");
 		this.cursorDot.setAttribute("class", "smith-cursor-dot");
 		this.cursorDot.style.display = "none";
 
@@ -109,17 +115,18 @@ export class SmithChart {
 	}
 
 	destroy(): void {
+		this.stopFadeLoop();
 		this.svg.remove();
 	}
 
-	setSessionPoints(points: SmithPoint[]): void {
-		this.sessionPoints = points;
-		this.redrawPoints();
+	setSessionPoints(_points: SmithPoint[]): void {
+		// Chart only shows points while they are fading
 	}
 
-	setFadePoints(points: SmithPoint[]): void {
-		this.fadePoints = points;
-		this.redrawPoints();
+	setFadePoints(entries: FadeEntry[]): void {
+		this.fadeEntries = entries;
+		this.syncPointElements();
+		this.startFadeLoop();
 	}
 
 	resize(): void {
@@ -139,6 +146,97 @@ export class SmithChart {
 		this.applyViewBox();
 	}
 
+	private syncPointElements(): void {
+		const latestId =
+			this.fadeEntries.length > 0 ? this.fadeEntries[0].point.id : null;
+		const keep = new Set(this.fadeEntries.map((e) => e.point.id));
+
+		for (const [id, el] of this.pointEls) {
+			if (!keep.has(id)) {
+				el.remove();
+				this.pointEls.delete(id);
+			}
+		}
+
+		for (const entry of this.fadeEntries) {
+			const p = entry.point;
+			let c = this.pointEls.get(p.id);
+			const isLatest = p.id === latestId;
+			if (!c) {
+				c = document.createElementNS(SVG_NS, "circle");
+				c.setAttribute("cx", String(p.gamma.re));
+				c.setAttribute("cy", String(-p.gamma.im));
+				this.pointsG.appendChild(c);
+				this.pointEls.set(p.id, c);
+			}
+			c.setAttribute(
+				"class",
+				isLatest ? "smith-point-active" : "smith-point-fade"
+			);
+		}
+		this.updatePointSizes();
+		this.updatePointOpacities();
+	}
+
+	/** User-space radius that renders as `px` screen pixels at current zoom */
+	private pxToUser(px: number): number {
+		const vb = this.svg.viewBox.baseVal;
+		if (!vb.width || !this.width) return px * 0.01;
+		return (px * vb.width) / this.width;
+	}
+
+	private updatePointSizes(): void {
+		const rActive = this.pxToUser(POINT_PX_ACTIVE);
+		const rFade = this.pxToUser(POINT_PX_FADE);
+		const latestId =
+			this.fadeEntries.length > 0 ? this.fadeEntries[0].point.id : null;
+		for (const entry of this.fadeEntries) {
+			const el = this.pointEls.get(entry.point.id);
+			if (!el) continue;
+			el.setAttribute(
+				"r",
+				String(entry.point.id === latestId ? rActive : rFade)
+			);
+		}
+		this.cursorDot.setAttribute("r", String(this.pxToUser(CURSOR_PX)));
+	}
+
+	private updatePointOpacities(): void {
+		const now = Date.now();
+		for (const entry of this.fadeEntries) {
+			const el = this.pointEls.get(entry.point.id);
+			if (!el) continue;
+			const remaining = Math.max(0, entry.expiresAt - now);
+			const t = remaining / FADE_MS;
+			const isLatest =
+				this.fadeEntries.length > 0 &&
+				entry.point.id === this.fadeEntries[0].point.id;
+			const peak = isLatest ? 1 : 0.55;
+			el.setAttribute("opacity", String(peak * t));
+		}
+	}
+
+	private startFadeLoop(): void {
+		this.stopFadeLoop();
+		if (this.fadeEntries.length === 0) return;
+		const tick = () => {
+			this.updatePointOpacities();
+			if (this.fadeEntries.some((e) => e.expiresAt > Date.now())) {
+				this.fadeRaf = requestAnimationFrame(tick);
+			} else {
+				this.fadeRaf = 0;
+			}
+		};
+		this.fadeRaf = requestAnimationFrame(tick);
+	}
+
+	private stopFadeLoop(): void {
+		if (this.fadeRaf) {
+			cancelAnimationFrame(this.fadeRaf);
+			this.fadeRaf = 0;
+		}
+	}
+
 	private applyViewBox(): void {
 		const aspect = this.width / this.height;
 		let hw = this.viewExtent / this.scale;
@@ -155,6 +253,7 @@ export class SmithChart {
 			`${minX} ${minY} ${hw * 2} ${hh * 2}`
 		);
 		this.redrawGrid(false);
+		this.updatePointSizes();
 	}
 
 	private redrawGrid(force: boolean): void {
@@ -163,30 +262,6 @@ export class SmithChart {
 		this.gridLevel = level;
 		renderGrid(SVG_NS, this.gridG, level);
 		renderScales(this.angleG, this.wlG, level);
-	}
-
-	private redrawPoints(): void {
-		while (this.pointsG.firstChild) {
-			this.pointsG.removeChild(this.pointsG.firstChild);
-		}
-
-		const fadeIds = new Set(this.fadePoints.map((p) => p.id));
-		const latestId =
-			this.fadePoints.length > 0 ? this.fadePoints[0].id : null;
-
-		for (const p of this.sessionPoints) {
-			if (!fadeIds.has(p.id)) continue;
-			const isLatest = p.id === latestId;
-			const c = document.createElementNS(SVG_NS, "circle");
-			c.setAttribute("cx", String(p.gamma.re));
-			c.setAttribute("cy", String(-p.gamma.im));
-			c.setAttribute("r", isLatest ? "0.022" : "0.016");
-			c.setAttribute(
-				"class",
-				isLatest ? "smith-point-active" : "smith-point-fade"
-			);
-			this.pointsG.appendChild(c);
-		}
 	}
 
 	private bindEvents(): void {

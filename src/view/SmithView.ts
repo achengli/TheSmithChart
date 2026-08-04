@@ -109,8 +109,9 @@ export class SmithView extends ItemView {
 
 		this.chartHost = root.createDiv({ cls: "smith-chart-host" });
 
-		this.unsub = this.history.onChange(() => this.renderHud());
+		this.unsub = this.history.onChange(() => this.syncHudRows());
 		this.recreateChart();
+		this.syncHudRows();
 
 		this.resizeObs = new ResizeObserver(() => {
 			this.chart?.resize();
@@ -159,8 +160,7 @@ export class SmithView extends ItemView {
 			onCursor: (info) => this.onCursor(info),
 			onPoint: (p) => this.onPoint(p),
 		});
-		this.chart.setSessionPoints(this.history.session);
-		this.chart.setFadePoints(this.history.fading.map((e) => e.point));
+		this.chart.setFadePoints([...this.history.fading]);
 		this.chart.resize();
 	}
 
@@ -177,49 +177,83 @@ export class SmithView extends ItemView {
 
 	private onPoint(point: SmithPoint): void {
 		this.history.add(point);
-		this.chart?.setSessionPoints(this.history.session);
-		this.chart?.setFadePoints(this.history.fading.map((e) => e.point));
-		this.renderHud();
+		this.chart?.setFadePoints([...this.history.fading]);
+		this.syncHudRows();
 	}
 
-	private renderHud(): void {
+	/** Create/remove HUD rows when the set of fading points changes */
+	private syncHudRows(): void {
 		if (!this.fadeListEl) return;
-		this.fadeListEl.empty();
-		const now = Date.now();
-		for (const entry of this.history.fading) {
-			const row = this.fadeListEl.createDiv({ cls: "smith-fade-row" });
-			row.setText(this.history.formatPoint(entry.point));
-			const remaining = Math.max(0, entry.expiresAt - now);
-			const progress = 1 - remaining / FADE_MS;
-			row.style.opacity = String(Math.max(0.15, 1 - progress));
-			row.style.animation = "none";
-			void row.offsetWidth;
-			row.style.animation = `smith-fade-out ${remaining}ms linear forwards`;
+		const keep = new Set(this.history.fading.map((e) => e.point.id));
+		const existing = new Map<string, HTMLElement>();
+		for (const child of Array.from(this.fadeListEl.children)) {
+			const id = (child as HTMLElement).dataset.pointId;
+			if (!id || !keep.has(id)) {
+				child.remove();
+			} else {
+				existing.set(id, child as HTMLElement);
+			}
 		}
-		this.chart?.setFadePoints(this.history.fading.map((e) => e.point));
+
+		for (const entry of this.history.fading) {
+			let row = existing.get(entry.point.id);
+			if (!row) {
+				row = document.createElement("div");
+				row.className = "smith-fade-row";
+				row.dataset.pointId = entry.point.id;
+				row.textContent = this.history.formatPoint(entry.point);
+			}
+			this.fadeListEl.appendChild(row);
+		}
+		this.updateHudOpacities();
+	}
+
+	private updateHudOpacities(): void {
+		if (!this.fadeListEl) return;
+		const now = Date.now();
+		const byId = new Map(
+			this.history.fading.map((e) => [e.point.id, e] as const)
+		);
+		for (const child of Array.from(this.fadeListEl.children)) {
+			const row = child as HTMLElement;
+			const entry = byId.get(row.dataset.pointId ?? "");
+			if (!entry) continue;
+			const remaining = Math.max(0, entry.expiresAt - now);
+			const t = remaining / FADE_MS;
+			const isLatest =
+				this.history.fading.length > 0 &&
+				entry.point.id === this.history.fading[0].point.id;
+			const peak = isLatest ? 1 : 0.55;
+			row.style.opacity = String(peak * t);
+		}
 	}
 
 	private startFadeLoop(): void {
 		this.stopFadeLoop();
-		this.fadeTimer = window.setInterval(() => {
-			if (this.history.pruneExpired()) {
-				this.renderHud();
+		const tick = () => {
+			const pruned = this.history.pruneExpired();
+			if (pruned) {
+				this.chart?.setFadePoints([...this.history.fading]);
+				this.syncHudRows();
+			} else {
+				this.updateHudOpacities();
 			}
-		}, 200);
+			this.fadeTimer = window.requestAnimationFrame(tick);
+		};
+		this.fadeTimer = window.requestAnimationFrame(tick);
 	}
 
 	private stopFadeLoop(): void {
 		if (this.fadeTimer !== null) {
-			window.clearInterval(this.fadeTimer);
+			window.cancelAnimationFrame(this.fadeTimer);
 			this.fadeTimer = null;
 		}
 	}
 
 	private openHistoryModal(): void {
 		new SessionHistoryModal(this.app, this.history, () => {
-			this.chart?.setSessionPoints(this.history.session);
-			this.chart?.setFadePoints(this.history.fading.map((e) => e.point));
-			this.renderHud();
+			this.chart?.setFadePoints([...this.history.fading]);
+			this.syncHudRows();
 		}).open();
 	}
 }

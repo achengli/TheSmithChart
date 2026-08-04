@@ -8,8 +8,8 @@ import {
 	angleDeg,
 } from "../math/smith";
 
-export const FADE_MS = 3000;
-export const MAX_VISIBLE_FADE = 3;
+export const FADE_MS = 6000;
+export const MAX_VISIBLE_FADE = 12;
 
 export type FadeEntry = {
 	point: SmithPoint;

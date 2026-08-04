@@ -97,20 +97,9 @@
 }
 
 .smith-fade-row {
-	color: var(--interactive-accent);
-	opacity: 0.55;
 	padding: 2px 8px;
-	/* Soft accent: lower opacity; color-mix when supported */
-	color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
-}
-
-@keyframes smith-fade-out {
-	from {
-		opacity: 0.7;
-	}
-	to {
-		opacity: 0;
-	}
+	color: color-mix(in srgb, var(--interactive-accent) 70%, transparent);
+	will-change: opacity;
 }
 
 .smith-chart-host {
@@ -212,7 +201,6 @@
 .smith-point-fade {
 	fill: color-mix(in srgb, var(--interactive-accent) 45%, transparent);
 	stroke: none;
-	opacity: 0.7;
 	pointer-events: none;
 }
 
