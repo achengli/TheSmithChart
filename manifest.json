@@ -1,0 +1,10 @@
+{
+	"id": "smith-chart",
+	"name": "Carta de Smith",
+	"version": "1.0.0",
+	"minAppVersion": "1.5.0",
+	"description": "Vista interactiva de la carta de Smith con zoom, puntos e historial.",
+	"author": "tao_mini",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}
